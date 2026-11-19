@@ -1,5 +1,6 @@
 package ph.bananatoss.game;
 
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -15,6 +16,11 @@ import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
+import android.text.InputType;
+import android.view.Gravity;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -92,6 +98,16 @@ public class GameView extends View {
     private final RectF bMode = new RectF(), bGravity = new RectF(), bWin = new RectF(), bLevel = new RectF(),
             bStart = new RectF(), bAgain = new RectF(), bMenu = new RectF(), bQuit = new RectF();
 
+    // aiming panel: angle -5 -1 [value] +1 +5, speed -5 -1 [value] +1 +5, Type, THROW
+    private static final int A_M5 = 0, A_M1 = 1, A_VAL = 2, A_P1 = 3, A_P5 = 4,
+            S_M5 = 5, S_M1 = 6, S_VAL = 7, S_P1 = 8, S_P5 = 9, B_TYPE = 10, B_THROW = 11;
+    private final RectF[] ctl = new RectF[12];
+    private final RectF panelBg = new RectF();
+    private int pressed = -1;          // control held down (for hold-to-repeat)
+    private float pressTime, repeatTime;
+    private boolean dialogOpen;
+    private float density = 1f;
+
     private final SharedPreferences prefs;
 
     public GameView(Context c) {
@@ -111,6 +127,8 @@ public class GameView extends View {
             tone = null;
         }
         setKeepScreenOn(true);
+        density = c.getResources().getDisplayMetrics().density;
+        for (int i = 0; i < ctl.length; i++) ctl[i] = new RectF();
     }
 
     private void beep(int t, int ms) {
@@ -172,6 +190,7 @@ public class GameView extends View {
         aimAngle = turn == 0 ? lastAngle[0] : lastAngle[1];
         aimSpeed = turn == 0 ? lastSpeed[0] : lastSpeed[1];
         cpuDelay = 0.9f;
+        pressed = -1;
         message = "";
         invalidate();
     }
@@ -380,6 +399,12 @@ public class GameView extends View {
                 if (cpuTurn()) {
                     cpuDelay -= dt;
                     if (cpuDelay <= 0) cpuThrow();
+                } else if (pressed >= 0 && isStep(pressed)) {
+                    pressTime += dt;
+                    if (pressTime > 0.45f) {
+                        repeatTime += dt;
+                        while (repeatTime > 0.07f) { repeatTime -= 0.07f; applyStep(pressed); }
+                    }
                 }
                 break;
             case FLY:
@@ -605,38 +630,113 @@ public class GameView extends View {
         }
     }
 
+    private static String fmt(float v) {
+        return Math.abs(v - Math.round(v)) < 0.05f ? String.format(Locale.US, "%.0f", v) : String.format(Locale.US, "%.1f", v);
+    }
+
+    private float panelText() { return Math.max(13, Math.min(H * 0.04f, W * 0.021f)); }
+
+    /** Lays out the aiming panel in the top corner on the thrower's side. */
+    private void layoutPanel(int p) {
+        float ts = Math.max(14, H * 0.04f), pt = panelText();
+        float bs = Math.max(pt * 1.75f, 40 * density), g = bs * 0.12f;
+        float lw = pt * 3.3f, vw = bs * 1.5f, tw = bs * 1.9f;
+        float rowW = lw + 4 * bs + vw + 5 * g;
+        float total = rowW + g * 2 + tw;
+        float m = ts * 0.6f;
+        float x0 = p == 0 ? m : W - m - total;
+        float y0 = ts * 1.75f;
+        // rows: the label sits at x0, buttons follow
+        for (int row = 0; row < 2; row++) {
+            float y = y0 + row * (bs + g), x = x0 + lw;
+            int base = row == 0 ? A_M5 : S_M5;
+            for (int k = 0; k < 5; k++) {
+                float w = k == 2 ? vw : bs;
+                ctl[base + k].set(x, y, x + w, y + bs);
+                x += w + g;
+            }
+        }
+        float cx = x0 + rowW + g;
+        // for the right-hand player put Type/THROW toward the middle of the screen
+        if (p == 1) {
+            float shift = tw + g * 2;
+            for (int i = 0; i < 10; i++) ctl[i].offset(shift, 0);
+            cx = x0;
+        }
+        ctl[B_TYPE].set(cx, y0, cx + tw, y0 + bs * 0.8f);
+        ctl[B_THROW].set(cx, y0 + bs * 0.8f + g, cx + tw, y0 + 2 * bs + g);
+        panelBg.set(x0 - g, y0 - g, x0 + total + g, y0 + 2 * bs + 2 * g);
+    }
+
     private void drawAim(Canvas c) {
         float ts = Math.max(14, H * 0.04f);
         int p = turn;
-        boolean has = p == 0 ? hasLast0 : hasLast1;
         float infoX = p == 0 ? ts * 0.6f : W - ts * 0.6f;
         Paint.Align al = p == 0 ? Paint.Align.LEFT : Paint.Align.RIGHT;
         if (cpuTurn()) {
             textAt(c, "Thinking...", infoX, ts * 2.6f, ts * 0.8f, Color.WHITE, al);
             return;
         }
+        // arrow from the gorilla's hand; length shows speed
+        double rad = Math.toRadians(p == 0 ? aimAngle : 180 - aimAngle);
+        float len = gh * (0.6f + 2.4f * aimSpeed / 100f);
+        float hx = handX(p), hy = handY(p);
+        float ex = hx + (float) Math.cos(rad) * len, ey = hy - (float) Math.sin(rad) * len;
+        stroke.setColor(Color.argb(220, 255, 255, 255));
+        stroke.setStrokeWidth(Math.max(3, ts * 0.12f));
+        c.drawLine(hx, hy, ex, ey, stroke);
+        float hs = ts * 0.5f;
+        double back1 = rad + Math.PI - 0.45, back2 = rad + Math.PI + 0.45;
+        c.drawLine(ex, ey, ex + (float) Math.cos(back1) * hs, ey - (float) Math.sin(back1) * hs, stroke);
+        c.drawLine(ex, ey, ex + (float) Math.cos(back2) * hs, ey - (float) Math.sin(back2) * hs, stroke);
+
+        layoutPanel(p);
+        float pt = panelText();
+        fill.setColor(Color.argb(150, 0, 0, 30));
+        c.drawRoundRect(panelBg, pt * 0.5f, pt * 0.5f, fill);
+        float labelX = (p == 0 ? panelBg.left : ctl[A_M5].left - (pt * 3.3f)) + pt * 0.35f;
+        textAt(c, "Angle", labelX, ctl[A_M5].centerY() + pt * 0.35f, pt, Color.WHITE, Paint.Align.LEFT);
+        textAt(c, "Speed", labelX, ctl[S_M5].centerY() + pt * 0.35f, pt, Color.WHITE, Paint.Align.LEFT);
+        String[] lab = {"-5", "-1", "", "+1", "+5"};
+        for (int k = 0; k < 5; k++) {
+            if (k == 2) continue;
+            smallButton(c, ctl[A_M5 + k], lab[k], pt, pressed == A_M5 + k);
+            smallButton(c, ctl[S_M5 + k], lab[k], pt, pressed == S_M5 + k);
+        }
+        valueBox(c, ctl[A_VAL], fmt(aimAngle) + "\u00b0", pt);
+        valueBox(c, ctl[S_VAL], fmt(aimSpeed), pt);
+        button(c, ctl[B_TYPE], "Type", pt * 0.9f, false);
+        button(c, ctl[B_THROW], "THROW", pt * 1.1f, true);
+
+        boolean has = p == 0 ? hasLast0 : hasLast1;
+        float below = panelBg.bottom + pt * 1.2f;
         if (has) {
             float la = p == 0 ? lastAngle[0] : lastAngle[1], lv = p == 0 ? lastSpeed[0] : lastSpeed[1];
-            textAt(c, String.format(Locale.US, "Last: %.0f°  %.0f", la, lv), infoX, ts * 2.6f, ts * 0.75f, Color.LTGRAY, al);
-        }
-        if (aiming) {
-            textAt(c, String.format(Locale.US, "Angle %.0f°", aimAngle), infoX, ts * 3.8f, ts, Color.WHITE, al);
-            textAt(c, String.format(Locale.US, "Speed %.0f", aimSpeed), infoX, ts * 5.0f, ts, Color.WHITE, al);
-            // arrow from the gorilla's hand; length shows speed
-            double rad = Math.toRadians(p == 0 ? aimAngle : 180 - aimAngle);
-            float len = gh * (0.6f + 2.4f * aimSpeed / 100f);
-            float hx = handX(p), hy = handY(p);
-            float ex = hx + (float) Math.cos(rad) * len, ey = hy - (float) Math.sin(rad) * len;
-            stroke.setColor(Color.argb(220, 255, 255, 255));
-            stroke.setStrokeWidth(Math.max(3, ts * 0.12f));
-            c.drawLine(hx, hy, ex, ey, stroke);
-            float hs = ts * 0.5f;
-            double back1 = rad + Math.PI - 0.45, back2 = rad + Math.PI + 0.45;
-            c.drawLine(ex, ey, ex + (float) Math.cos(back1) * hs, ey - (float) Math.sin(back1) * hs, stroke);
-            c.drawLine(ex, ey, ex + (float) Math.cos(back2) * hs, ey - (float) Math.sin(back2) * hs, stroke);
+            textAt(c, "Last: " + fmt(la) + "\u00b0  " + fmt(lv), infoX, below, pt * 0.85f, Color.LTGRAY, al);
         } else {
-            textAt(c, name(p) + ": drag to aim, let go to throw", W / 2f, H * 0.3f, ts * 0.85f, Color.WHITE, Paint.Align.CENTER);
+            textAt(c, "Tap +/- or the numbers, or drag to aim", infoX, below, pt * 0.85f, Color.LTGRAY, al);
         }
+    }
+
+    private void smallButton(Canvas c, RectF r, String label, float ts, boolean down) {
+        fill.setColor(down ? Color.rgb(90, 90, 170) : Color.argb(220, 40, 40, 110));
+        c.drawRoundRect(r, ts * 0.35f, ts * 0.35f, fill);
+        stroke.setColor(Color.argb(140, 255, 255, 255));
+        stroke.setStrokeWidth(2);
+        c.drawRoundRect(r, ts * 0.35f, ts * 0.35f, stroke);
+        text.setTextSize(ts);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setColor(Color.WHITE);
+        c.drawText(label, r.centerX(), r.centerY() + ts * 0.35f, text);
+    }
+
+    private void valueBox(Canvas c, RectF r, String label, float ts) {
+        fill.setColor(Color.rgb(250, 245, 220));
+        c.drawRoundRect(r, ts * 0.35f, ts * 0.35f, fill);
+        text.setTextSize(ts * 1.05f);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setColor(Color.rgb(30, 20, 0));
+        c.drawText(label, r.centerX(), r.centerY() + ts * 0.38f, text);
     }
 
     private void button(Canvas c, RectF r, String label, float ts, boolean primary) {
@@ -729,37 +829,121 @@ public class GameView extends View {
             }
             return true;
         }
-        if (state != State.AIM || cpuTurn()) return true;
+        if (state != State.AIM || cpuTurn() || dialogOpen) return true;
         switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                downX = x; downY = y;
-                aiming = true;
-                updateAim(x, y);
+            case MotionEvent.ACTION_DOWN: {
+                layoutPanel(turn);
+                int hit = -1;
+                for (int i = 0; i < ctl.length; i++) {
+                    RectF r = ctl[i];
+                    float pad = r.height() * 0.06f;
+                    if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) { hit = i; break; }
+                }
+                if (hit >= 0) {
+                    pressed = hit; pressTime = 0; repeatTime = 0;
+                    if (isStep(hit)) applyStep(hit);
+                } else if (panelBg.contains(x, y)) {
+                    pressed = -2; // ignore touches on the panel background
+                } else {
+                    pressed = -1;
+                    downX = x; downY = y;
+                    aiming = true;
+                }
                 break;
+            }
             case MotionEvent.ACTION_MOVE:
-                updateAim(x, y);
+                if (aiming) updateAim(x, y);
                 break;
-            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_UP: {
+                int hit = pressed;
+                pressed = -1;
                 aiming = false;
-                float dragged = (float) Math.hypot(x - downX, y - downY);
-                if (dragged > gh * 0.25f) throwBanana(turn, aimAngle, aimSpeed);
+                if (hit == B_THROW && ctl[B_THROW].contains(x, y)) throwBanana(turn, aimAngle, aimSpeed);
+                else if ((hit == B_TYPE || hit == A_VAL || hit == S_VAL) && ctl[hit].contains(x, y)) showInputDialog(hit == S_VAL);
                 break;
+            }
             case MotionEvent.ACTION_CANCEL:
                 aiming = false;
+                pressed = -1;
                 break;
             default:
                 break;
         }
+        invalidate();
         return true;
     }
 
-    /** The drag points the way to throw: its direction is the angle, its length the speed. */
+    private static boolean isStep(int i) { return i != A_VAL && i != S_VAL && i != B_TYPE && i != B_THROW && i >= 0; }
+
+    private void applyStep(int i) {
+        float[] d = {-5, -1, 0, 1, 5};
+        if (i <= A_P5) aimAngle = clampAngle(Math.round(aimAngle) + d[i - A_M5]);
+        else aimSpeed = clampSpeed(Math.round(aimSpeed) + d[i - S_M5]);
+        beep(ToneGenerator.TONE_PROP_BEEP2, 15);
+        invalidate();
+    }
+
+    private static float clampAngle(float a) { return Math.max(0, Math.min(180, a)); }
+    private static float clampSpeed(float v) { return Math.max(1, Math.min(100, v)); }
+
+    private static Float parse(EditText e) {
+        try { return Float.parseFloat(e.getText().toString().trim().replace(',', '.')); }
+        catch (NumberFormatException ex) { return null; }
+    }
+
+    /** Lets the player type an exact angle and speed. */
+    private void showInputDialog(boolean focusSpeed) {
+        final int p = turn;
+        Context ctx = getContext();
+        float d = density;
+        LinearLayout box = new LinearLayout(ctx);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (20 * d);
+        box.setPadding(pad, pad / 2, pad, 0);
+        final EditText ea = new EditText(ctx), es = new EditText(ctx);
+        TextView la = new TextView(ctx), ls = new TextView(ctx);
+        la.setText("Angle in degrees (0\u2013180, 90 = straight up)");
+        ls.setText("Speed (1\u2013100)");
+        ea.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        es.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        ea.setText(fmt(aimAngle));
+        es.setText(fmt(aimSpeed));
+        ea.setSelectAllOnFocus(true);
+        es.setSelectAllOnFocus(true);
+        ea.setGravity(Gravity.CENTER);
+        es.setGravity(Gravity.CENTER);
+        box.addView(la); box.addView(ea); box.addView(ls); box.addView(es);
+        dialogOpen = true;
+        AlertDialog dlg = new AlertDialog.Builder(ctx, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                .setTitle(name(p) + ": set your throw")
+                .setView(box)
+                .setPositiveButton("Throw", (di, w) -> {
+                    if (apply(ea, es) && state == State.AIM && turn == p) throwBanana(p, aimAngle, aimSpeed);
+                })
+                .setNeutralButton("Set only", (di, w) -> apply(ea, es))
+                .setNegativeButton("Cancel", null)
+                .create();
+        dlg.setOnDismissListener(di -> { dialogOpen = false; invalidate(); });
+        dlg.show();
+        (focusSpeed ? es : ea).requestFocus();
+        if (dlg.getWindow() != null) dlg.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+    }
+
+    private boolean apply(EditText ea, EditText es) {
+        Float a = parse(ea), v = parse(es);
+        if (a != null) aimAngle = clampAngle(a);
+        if (v != null) aimSpeed = clampSpeed(v);
+        invalidate();
+        return a != null && v != null;
+    }
+
+    /** Dragging (away from the panel) sets the aim: direction is the angle, length the speed. Use THROW to fire. */
     private void updateAim(float x, float y) {
         float dx = x - downX, dy = downY - y;
         float len = (float) Math.hypot(dx, dy);
         if (len < gh * 0.25f) return;
         float deg = (float) Math.toDegrees(Math.atan2(dy, turn == 0 ? dx : -dx));
-        aimAngle = Math.max(-30, Math.min(150, Math.round(deg)));
+        aimAngle = clampAngle(Math.round(deg));
         float maxDrag = H * 0.55f;
         aimSpeed = Math.max(1, Math.min(100, Math.round(len / maxDrag * 100)));
     }
